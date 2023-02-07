@@ -44,8 +44,8 @@ class RequestReceived(Event):
             raise ProtocolError("Unsupported method {}".format(headers[":method"]))
 
         scheme = headers.pop(":scheme")
-        if scheme not in ["http", "https"]:
-            raise ProtocolError("Scheme should be either http or https")
+        if scheme not in ["http", "https", "unix"]:
+            raise ProtocolError("Scheme should be http, https or unix")
 
         if headers[":path"].startswith("/"):
             service_name, method_name = headers.pop(":path")[1:].split("/")

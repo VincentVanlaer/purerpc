@@ -85,10 +85,8 @@ async def _service_wrapper(service=None, setup_fn=None, teardown_fn=None):
         await teardown_fn()
 
 
-class Server:
-    def __init__(self, port=50055, ssl_context=None):
-        self.port = port
-        self._ssl_context = ssl_context
+class AbstractServer:
+    def __init__(self):
         self.services = {}
         self._connection_count = 0
         self._exception_count = 0
@@ -115,6 +113,24 @@ class Server:
         else:
             raise ValueError("Shouldn't have happened")
 
+
+    def serve(self, backend=None):
+        """
+        DEPRECATED - use serve_async() instead
+
+        This function runs an entire async event loop (there can only be one
+        per thread), and there is no way to know when the server is ready for
+        connections.
+        """
+        purerpc_run(self.serve_async, backend=backend)
+
+
+class Server(AbstractServer):
+    def __init__(self, port=50055, ssl_context=None):
+        super().__init__()
+        self.port = port
+        self._ssl_context = ssl_context
+
     async def serve_async(self, *, task_status=TASK_STATUS_IGNORED):
         """Run the grpc server
 
@@ -125,6 +141,7 @@ class Server:
         # TODO: resource usage warning
         async with AsyncExitStack() as stack:
             tcp_server = await anyio.create_tcp_listener(local_port=self.port, reuse_port=True)
+            stack.push_async_callback(tcp_server.aclose)
             # read the resulting port, in case it was 0
             self.port = tcp_server.extra(anyio.abc.SocketAttribute.local_port)
             if self._ssl_context:
@@ -138,15 +155,30 @@ class Server:
 
             await tcp_server.serve(ConnectionHandler(services_dict, self))
 
-    def serve(self, backend=None):
-        """
-        DEPRECATED - use serve_async() instead
 
-        This function runs an entire async event loop (there can only be one
-        per thread), and there is no way to know when the server is ready for
-        connections.
+class UnixServer(AbstractServer):
+    def __init__(self, path: str):
+        super().__init__()
+        self.path = path
+
+    async def serve_async(self, *, task_status=TASK_STATUS_IGNORED):
+        """Run the grpc server
+
+        The task_status protocol lets the caller know when the server is
+        listening, and yields the port number (same given to Server constructor).
         """
-        purerpc_run(self.serve_async, backend=backend)
+
+        # TODO: resource usage warning
+        async with AsyncExitStack() as stack:
+            unix_server = await anyio.create_unix_listener(self.path)
+            stack.push_async_callback(unix_server.aclose)
+            task_status.started()
+
+            services_dict = {}
+            for key, value in self.services.items():
+                services_dict[key] = await stack.enter_async_context(value)
+
+            await unix_server.serve(ConnectionHandler(services_dict, self))
 
 
 class ConnectionHandler:
