@@ -1,9 +1,10 @@
+from __future__ import annotations
 import sys
 import enum
 import socket
 import datetime
 from contextlib import AsyncExitStack
-from typing import Dict
+from typing import Optional
 
 import anyio
 import anyio.abc
@@ -205,7 +206,8 @@ class GRPCSocket(AsyncExitStack):
         self._grpc_connection = GRPCConnection(config=config)
         self._socket = SocketWrapper(self._grpc_connection, sock)
         self._receive_buffer_size = receive_buffer_size
-        self._streams = {}  # type: Dict[int, GRPCStream]
+        self._streams: dict[int, GRPCStream] = {}
+        self._exiting = False
 
     async def __aenter__(self):
         await super().__aenter__()
@@ -217,6 +219,10 @@ class GRPCSocket(AsyncExitStack):
             self.callback(task_group.cancel_scope.cancel)
             task_group.start_soon(self._reader_thread)
         return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        self._exiting = True
+        await super().__aexit__(exc_type, exc_value, traceback)
 
     @property
     def client_side(self):
@@ -233,11 +239,10 @@ class GRPCSocket(AsyncExitStack):
         while True:
             try:
                 data = await self._socket.recv(self._receive_buffer_size)
-            # TODO: Not too confident that BrokenResourceError should be treated
-            #  the same as EndOfStream (maybe the handler wants to know?), but it's
-            #  here for parity with anyio 1.x behavior.
             except (anyio.EndOfStream, anyio.BrokenResourceError):
-                return
+                if self._exiting:
+                    return
+                raise
             events = self._grpc_connection.receive_data(data)
             await self._socket.flush()
             for event in events:
